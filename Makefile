@@ -204,6 +204,9 @@ endif
 ifeq (${FORCE_ASSERT}, 1)
 	CMAKE_VARS:=${CMAKE_VARS} -DFORCE_ASSERT=1
 endif
+ifeq (${LOG_ASSERT}, 1)
+	CMAKE_VARS:=${CMAKE_VARS} -DLOG_ASSERT=1
+endif
 ifeq (${FORCE_DEBUG}, 1)
 	CMAKE_VARS:=${CMAKE_VARS} -DFORCE_DEBUG=1
 endif
@@ -426,6 +429,12 @@ relassert: ${EXTENSION_CONFIG_STEP}
 	mkdir -p ./build/relassert && \
 	cd build/relassert && \
 	cmake $(GENERATOR) $(FORCE_COLOR) ${WARNINGS_AS_ERRORS} ${FORCE_32_BIT_FLAG} ${DISABLE_UNITY_FLAG} ${DISABLE_SANITIZER_FLAG} ${STATIC_LIBCPP} ${CMAKE_VARS} ${CMAKE_VARS_BUILD} -DFORCE_ASSERT=1 -DCMAKE_BUILD_TYPE=RelWithDebInfo ../.. && \
+	cmake --build . --config RelWithDebInfo
+
+rellogassert: ${EXTENSION_CONFIG_STEP}
+	mkdir -p ./build/rellogassert && \
+	cd build/rellogassert && \
+	cmake $(GENERATOR) $(FORCE_COLOR) ${WARNINGS_AS_ERRORS} ${FORCE_32_BIT_FLAG} ${DISABLE_UNITY_FLAG} ${DISABLE_SANITIZER_FLAG} ${STATIC_LIBCPP} ${CMAKE_VARS} ${CMAKE_VARS_BUILD} -DLOG_ASSERT=1 -DCMAKE_BUILD_TYPE=RelWithDebInfo ../.. && \
 	cmake --build . --config RelWithDebInfo
 
 benchmark:

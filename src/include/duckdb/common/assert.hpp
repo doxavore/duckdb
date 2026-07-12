@@ -10,6 +10,19 @@
 
 #pragma once
 
+namespace duckdb {
+DUCKDB_API void DuckDBAssertInternal(bool condition, const char *condition_name, const char *file, int linenr);
+DUCKDB_API void DuckDBAssertLogInternal(bool condition, const char *condition_name, const char *file, int linenr);
+}
+
+#if defined(DUCKDB_LOG_ASSERT)
+
+//! Evaluate assertions and log failures without changing release-mode control flow.
+//! D_ASSERT_IS_ENABLED is intentionally not defined, keeping additional debug-only verification disabled.
+#define D_ASSERT(condition) duckdb::DuckDBAssertLogInternal(bool(condition), #condition, __FILE__, __LINE__)
+
+#else
+
 // clang-format off
 #if ( \
     /* Not a debug build */ \
@@ -25,18 +38,13 @@
 //! Only the 'else' condition is supposed to check the assertions
 #include <assert.h>
 #define D_ASSERT assert
-namespace duckdb {
-DUCKDB_API void DuckDBAssertInternal(bool condition, const char *condition_name, const char *file, int linenr);
-}
 
 #else
-namespace duckdb {
-DUCKDB_API void DuckDBAssertInternal(bool condition, const char *condition_name, const char *file, int linenr);
-}
 
 #define D_ASSERT(condition) duckdb::DuckDBAssertInternal(bool(condition), #condition, __FILE__, __LINE__)
 #define D_ASSERT_IS_ENABLED
 
+#endif
 #endif
 
 //! Force assertion implementation, which always asserts whatever build type is used.
