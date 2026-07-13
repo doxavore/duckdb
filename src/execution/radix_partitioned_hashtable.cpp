@@ -2,6 +2,7 @@
 
 #include "duckdb/common/radix_partitioning.hpp"
 #include "duckdb/common/row_operations/row_operations.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/row/tuple_data_collection.hpp"
 #include "duckdb/common/types/row/tuple_data_iterator.hpp"
 #include "duckdb/execution/aggregate_hashtable.hpp"
@@ -10,6 +11,8 @@
 #include "duckdb/execution/operator/aggregate/physical_hash_aggregate.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/storage/temporary_memory_manager.hpp"
+
+#include <cstdio>
 
 namespace duckdb {
 
@@ -469,8 +472,10 @@ void MaybeRepartition(ClientContext &context, RadixHTGlobalSinkState &gstate, Ra
 	// Check if we're approaching the memory limit
 	auto &temporary_memory_state = *gstate.temporary_memory_state;
 	const auto aggregate_allocator_size = ht.GetAggregateAllocator()->AllocationSize();
-	const auto total_size =
-	    aggregate_allocator_size + ht.GetPartitionedData().SizeInBytes() + ht.Capacity() * sizeof(ht_entry_t);
+	const auto partitioned_data_size = ht.GetPartitionedData().SizeInBytes();
+	const auto hash_table_capacity = ht.Capacity();
+	const auto hash_table_capacity_size = hash_table_capacity * sizeof(ht_entry_t);
+	const auto total_size = aggregate_allocator_size + partitioned_data_size + hash_table_capacity_size;
 	if (total_size > gstate.GetThreadLimit()) {
 		// We're over the thread memory limit
 		if (!gstate.external) {
@@ -478,11 +483,63 @@ void MaybeRepartition(ClientContext &context, RadixHTGlobalSinkState &gstate, Ra
 			auto guard = gstate.Lock();
 			if (total_size > gstate.GetThreadLimit()) {
 				// Out-of-core would be triggered below, update minimum reservation and try to increase the reservation
-				temporary_memory_state.SetMinimumReservation(aggregate_allocator_size * gstate.number_of_threads +
-				                                             gstate.minimum_reservation);
-				auto remaining_size =
-				    MaxValue<idx_t>(gstate.number_of_threads * total_size, temporary_memory_state.GetRemainingSize());
-				temporary_memory_state.SetRemainingSizeAndUpdateReservation(context, 2 * remaining_size);
+				const auto previous_minimum_reservation = gstate.minimum_reservation.load();
+				const auto minimum_reservation =
+				    aggregate_allocator_size * gstate.number_of_threads + previous_minimum_reservation;
+				temporary_memory_state.SetMinimumReservation(minimum_reservation);
+				const auto previous_remaining_size = temporary_memory_state.GetRemainingSize();
+				const auto thread_scaled_size = gstate.number_of_threads * total_size;
+				const auto remaining_size = MaxValue<idx_t>(thread_scaled_size, previous_remaining_size);
+				const auto requested_remaining_size = 2 * remaining_size;
+				const auto max_size = NumericLimits<idx_t>::Maximum();
+				const bool capacity_overflow = hash_table_capacity > max_size / sizeof(ht_entry_t);
+				const bool total_overflow = aggregate_allocator_size > max_size - partitioned_data_size ||
+				                            hash_table_capacity_size >
+				                                max_size - aggregate_allocator_size - partitioned_data_size;
+				const bool thread_scale_overflow =
+				    gstate.number_of_threads != 0 && total_size > max_size / gstate.number_of_threads;
+				const bool minimum_reservation_overflow =
+				    gstate.number_of_threads != 0 &&
+				    aggregate_allocator_size >
+				        (max_size - previous_minimum_reservation) / gstate.number_of_threads;
+				const bool double_overflow = remaining_size > max_size / 2;
+				if (capacity_overflow || total_overflow || thread_scale_overflow || minimum_reservation_overflow ||
+				    double_overflow || requested_remaining_size == 0) {
+					const auto &query = context.GetCurrentQuery();
+					fprintf(stderr,
+					        "DUCKDB_TEMP_MEMORY_DIAGNOSTIC: context=%p gstate=%p lstate=%p ht=%p memory_state=%p "
+					        "connection_id=%llu query_hash=%llu query_length=%llu threads=%llu "
+					        "aggregate_allocator_size=%llu partitioned_data_size=%llu hash_table_capacity=%llu "
+					        "hash_table_capacity_size=%llu total_size=%llu thread_limit=%llu "
+					        "previous_remaining_size=%llu thread_scaled_size=%llu remaining_size=%llu "
+					        "requested_remaining_size=%llu reservation=%llu previous_minimum_reservation=%llu "
+					        "minimum_reservation=%llu capacity_overflow=%d total_overflow=%d "
+					        "thread_scale_overflow=%d minimum_reservation_overflow=%d double_overflow=%d zero=%d\n",
+					        static_cast<void *>(&context), static_cast<void *>(&gstate), static_cast<void *>(&lstate),
+					        static_cast<void *>(&ht), static_cast<void *>(&temporary_memory_state),
+					        static_cast<unsigned long long>(context.GetConnectionId()),
+					        static_cast<unsigned long long>(StringUtil::CIHash(query)),
+					        static_cast<unsigned long long>(query.size()),
+					        static_cast<unsigned long long>(gstate.number_of_threads),
+					        static_cast<unsigned long long>(aggregate_allocator_size),
+					        static_cast<unsigned long long>(partitioned_data_size),
+					        static_cast<unsigned long long>(hash_table_capacity),
+					        static_cast<unsigned long long>(hash_table_capacity_size),
+					        static_cast<unsigned long long>(total_size),
+					        static_cast<unsigned long long>(gstate.GetThreadLimit()),
+					        static_cast<unsigned long long>(previous_remaining_size),
+					        static_cast<unsigned long long>(thread_scaled_size),
+					        static_cast<unsigned long long>(remaining_size),
+					        static_cast<unsigned long long>(requested_remaining_size),
+					        static_cast<unsigned long long>(temporary_memory_state.GetReservation()),
+					        static_cast<unsigned long long>(previous_minimum_reservation),
+					        static_cast<unsigned long long>(minimum_reservation), static_cast<int>(capacity_overflow),
+					        static_cast<int>(total_overflow), static_cast<int>(thread_scale_overflow),
+					        static_cast<int>(minimum_reservation_overflow), static_cast<int>(double_overflow),
+					        static_cast<int>(requested_remaining_size == 0));
+					fflush(stderr);
+				}
+				temporary_memory_state.SetRemainingSizeAndUpdateReservation(context, requested_remaining_size);
 			}
 		}
 	}
@@ -494,6 +551,28 @@ void MaybeRepartition(ClientContext &context, RadixHTGlobalSinkState &gstate, Ra
 				lstate.abandoned_data = make_uniq<RadixPartitionedTupleData>(
 				    BufferManager::GetBufferManager(context), gstate.radix_ht.GetLayoutPtr(), MemoryTag::HASH_TABLE,
 				    config.GetRadixBits(), gstate.radix_ht.GetLayout().ColumnCount() - 1);
+			}
+			const auto source_partition_count = ht.GetPartitionedData().PartitionCount();
+			const auto abandoned_partition_count = lstate.abandoned_data->PartitionCount();
+			const auto target_partition_count = RadixPartitioning::NumberOfPartitions(config.GetRadixBits());
+			if (abandoned_partition_count < source_partition_count ||
+			    abandoned_partition_count != target_partition_count) {
+				const auto &query = context.GetCurrentQuery();
+				fprintf(stderr,
+				        "DUCKDB_ABANDONED_DATA_GEOMETRY_INVALID: context=%p gstate=%p lstate=%p ht=%p "
+				        "abandoned_data=%p connection_id=%llu query_hash=%llu query_length=%llu "
+				        "ht_radix_bits=%llu global_radix_bits=%llu source_partition_count=%llu "
+				        "abandoned_partition_count=%llu target_partition_count=%llu\n",
+				        static_cast<void *>(&context), static_cast<void *>(&gstate), static_cast<void *>(&lstate),
+				        static_cast<void *>(&ht), static_cast<void *>(lstate.abandoned_data.get()),
+				        static_cast<unsigned long long>(context.GetConnectionId()),
+				        static_cast<unsigned long long>(StringUtil::CIHash(query)),
+				        static_cast<unsigned long long>(query.size()), static_cast<unsigned long long>(ht.GetRadixBits()),
+				        static_cast<unsigned long long>(config.GetRadixBits()),
+				        static_cast<unsigned long long>(source_partition_count),
+				        static_cast<unsigned long long>(abandoned_partition_count),
+				        static_cast<unsigned long long>(target_partition_count));
+				fflush(stderr);
 			}
 			ht.SetRadixBits(gstate.config.GetRadixBits());
 			ht.AcquirePartitionedData()->Repartition(context, *lstate.abandoned_data);

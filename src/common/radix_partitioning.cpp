@@ -5,6 +5,8 @@
 #include "duckdb/common/vector_operations/binary_executor.hpp"
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 
+#include <cstdio>
+
 namespace duckdb {
 
 //! Templated radix partitioning constants, can be templated to the number of radix bits
@@ -249,6 +251,18 @@ void RadixPartitionedTupleData::RepartitionFinalizeStates(PartitionedTupleData &
 	const auto &new_radix_partitions = new_partitioned_data.Cast<RadixPartitionedTupleData>();
 	const auto old_radix_bits = old_radix_partitions.GetRadixBits();
 	const auto new_radix_bits = new_radix_partitions.GetRadixBits();
+	if (new_radix_bits <= old_radix_bits) {
+		fprintf(stderr,
+		        "DUCKDB_RADIX_REPARTITION_INVALID: old_radix_bits=%llu new_radix_bits=%llu "
+		        "old_partition_count=%llu new_partition_count=%llu finished_partition_idx=%llu "
+		        "pin_state_count=%llu\n",
+		        static_cast<unsigned long long>(old_radix_bits), static_cast<unsigned long long>(new_radix_bits),
+		        static_cast<unsigned long long>(old_partitioned_data.PartitionCount()),
+		        static_cast<unsigned long long>(new_partitioned_data.PartitionCount()),
+		        static_cast<unsigned long long>(finished_partition_idx),
+		        static_cast<unsigned long long>(state.partition_pin_states.size()));
+		fflush(stderr);
+	}
 	D_ASSERT(new_radix_bits > old_radix_bits);
 
 	// We take the most significant digits as the partition index
